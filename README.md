@@ -25,19 +25,19 @@ The diagram below shows how the user's phone call is bridged via SIP, routed thr
 
 ```mermaid
 graph TD
-    User([Patient / Caller Phone]) <-->|PSTN Network| Twilio[SIP Trunking / Twilio / Vobiz]
-    Twilio <-->|SIP REFER / WebRTC| LiveKitCloud[LiveKit Cloud Server]
-    LiveKitCloud <-->|Job Dispatch / Audio Stream| AgentWorker[LiveKit Agent Worker - Render Cloud]
+    User(["Patient / Caller Phone"]) <-->|"PSTN Network"| Twilio["SIP Trunking / Twilio / Vobiz"]
+    Twilio <-->|"SIP REFER / WebRTC"| LiveKitCloud["LiveKit Cloud Server"]
+    LiveKitCloud <-->|"Job Dispatch / Audio Stream"| AgentWorker["LiveKit Agent Worker - Render Cloud"]
     
-    subgraph AgentWorker [Agent Worker - Python Container]
-        MainAgent[agent.py - Worker Process]
-        DB[(clinic.db - SQLite Database)]
+    subgraph AgentWorker ["Agent Worker - Python Container"]
+        MainAgent["agent.py - Worker Process"]
+        DB[("clinic.db - SQLite Database")]
         
-        MainAgent <-->|Read/Write Slots & Appointments| DB
+        MainAgent <-->|"Read/Write Slots & Appointments"| DB
     end
 
-    AgentWorker <-->|Streaming Audio (STT & TTS)| Deepgram[Deepgram STT & TTS API]
-    AgentWorker <-->|Prompt, History & Tools JSON| Groq[Groq Llama 3.3 LLM API]
+    AgentWorker <-->|"Streaming Audio (STT & TTS)"| Deepgram["Deepgram STT & TTS API"]
+    AgentWorker <-->|"Prompt, History & Tools JSON"| Groq["Groq Llama 3.3 LLM API"]
 ```
 
 ### Call Flow & Conflict Resolution Sequence
