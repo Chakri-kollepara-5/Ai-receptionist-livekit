@@ -14,8 +14,6 @@ from livekit.plugins import (
     openai,
     cartesia,
     deepgram,
-    noise_cancellation,
-    silero,
     sarvam,
 )
 from livekit.agents import llm
@@ -327,7 +325,6 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Initialize the Agent Session with plugins
     session = AgentSession(
-        vad=silero.VAD.load(),
         stt=deepgram.STT(model=config.STT_MODEL, language=config.STT_LANGUAGE), 
         llm=_build_llm(config_dict.get("model_provider")),
         tts=_build_tts(config_dict.get("model_provider"), config_dict.get("voice_id")),
@@ -338,7 +335,6 @@ async def entrypoint(ctx: agents.JobContext):
         room=ctx.room,
         agent=OutboundAssistant(instructions=system_instructions, tools=list(fnc_ctx.function_tools.values())),
         room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVCTelephony(),
             close_on_disconnect=True,
         ),
     )
