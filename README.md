@@ -11,10 +11,62 @@ Patients can call in, speak naturally, and manage their appointments (booking, r
 This project uses **LiveKit Agents SDK** integrated with **Deepgram** (for STT/TTS) and **Groq** running `llama-3.3-70b-versatile` (for reasoning/LLM).
 
 ### Why this stack?
-1. **LiveKit Agents Framework:** Unlike standard LLM chatbots with a sluggish voice layer slapped on top, LiveKit handles WebRTC audio streaming, Voice Activity Detection (VAD), and tool calling in a single unified pipeline. This allows immediate interruption handling and seamless conversation flow.
+1. **LiveKit Agents Framework:** Unlike standard LLM chatbots with a sluggish voice layer slashed on top, LiveKit handles WebRTC audio streaming, Voice Activity Detection (VAD), and tool calling in a single unified pipeline. This allows immediate interruption handling and seamless conversation flow.
 2. **Groq (Llama 3.3 70B):** Groq's LPU architecture delivers text completion with sub-200ms latency. In voice agents, every millisecond counts; Groq prevents awkward conversational pauses.
 3. **Deepgram STT & TTS:** Deepgram Nova-2 is the fastest STT on the market, transcribing audio streams in real-time. Aura TTS provides human-like speech output with sub-300ms time-to-first-audio latency.
 4. **SQLite Database Backend:** A local SQLite database is chosen for storage. It requires zero setup/external infrastructure, is file-based, supports ACID-compliant transactions, and lets tool calls query real structured slots.
+
+---
+
+## 📐 Architecture & System Design
+
+### System Block Diagram
+The diagram below shows how the user's phone call is bridged via SIP, routed through LiveKit Cloud to our cloud-deployed agent worker, and orchestrated with Deepgram and Groq:
+
+```mermaid
+graph TD
+    User([Patient / Caller Phone]) <-->|PSTN Network| Twilio[SIP Trunking / Twilio / Vobiz]
+    Twilio <-->|SIP REFER / WebRTC| LiveKitCloud[LiveKit Cloud Server]
+    LiveKitCloud <-->|Job Dispatch / Audio Stream| AgentWorker[LiveKit Agent Worker - Render Cloud]
+    
+    subgraph AgentWorker [Agent Worker - Python Container]
+        MainAgent[agent.py - Worker Process]
+        DB[(clinic.db - SQLite Database)]
+        
+        MainAgent <-->|Read/Write Slots & Appointments| DB
+    end
+
+    AgentWorker <-->|Streaming Audio (STT & TTS)| Deepgram[Deepgram STT & TTS API]
+    AgentWorker <-->|Prompt, History & Tools JSON| Groq[Groq Llama 3.3 LLM API]
+```
+
+### Call Flow & Conflict Resolution Sequence
+The diagram below illustrates the turn-by-turn workflow when a patient requests a slot that is already booked, triggering database validation and alternative slot negotiations:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Patient as Patient Phone
+    participant LK as LiveKit Cloud
+    participant Worker as Agent Worker (Render)
+    participant DB as SQLite DB (clinic.db)
+    participant Groq as Groq (Llama 3.3)
+
+    Patient->>LK: Dials SIP Phone Number
+    LK->>Worker: Dispatches Agent Job Request
+    Worker->>LK: Joins room and generates initial greeting
+    LK->>Patient: Speaks: "Hello, welcome to Blackfriars. How can I help?"
+    Patient->>LK: "I want to book with Dr. Ami next Monday at 10:30 AM"
+    LK->>Worker: Stream audio -> Transcribe to text -> Send to worker
+    Worker->>Groq: Submits user query + system prompts
+    Groq->>Worker: Requests tool: check_availability(doctor="Ami", date="2026-06-22")
+    Worker->>DB: Query slots for doctor Ami on Monday
+    DB-->>Worker: Returns: 10:30 AM is Booked. 9:30 AM and 2:30 PM are Available.
+    Worker-->>Groq: Returns tool result (slot availability status)
+    Groq->>Worker: Generates reply: "10:30 AM is taken, but 9:30 AM or 2:30 PM are free"
+    Worker->>LK: Synthesizes text to speech (Deepgram TTS) and streams audio
+    LK->>Patient: Plays audio response
+```
 
 ---
 
