@@ -386,5 +386,7 @@ if __name__ == "__main__":
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
             agent_name="outbound-caller", 
+            port=int(os.getenv("PORT", "8081")),
+            num_idle_processes=0,  # Prevent memory limits overflow in 512MB free tier containers
         )
     )
