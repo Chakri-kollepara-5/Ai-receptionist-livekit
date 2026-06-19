@@ -29,6 +29,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("outbound-agent")
 
 import config
+import datetime
+import database
 
 # TRUNK ID - Now loaded from config.py
 # You can find this by running 'python setup_trunk.py --list' or checking LiveKit Dashboard 
@@ -88,22 +90,146 @@ def _build_llm(config_provider: str = None):
 
 
 
-class TransferFunctions(llm.ToolContext):
+class ClinicReceptionistTools(llm.ToolContext):
     def __init__(self, ctx: agents.JobContext, phone_number: str = None):
         super().__init__(tools=[])
         self.ctx = ctx
         self.phone_number = phone_number
 
-    @llm.function_tool(description="Look up user details by phone number.")
-    def lookup_user(self, phone: str):
+    def _find_doctor_id(self, doctor_name: str) -> Optional[int]:
+        if not doctor_name:
+            return None
+        clean_name = doctor_name.lower().replace("dr.", "").replace("dr", "").strip()
+        doctors = database.get_doctors_by_specialty()
+        for doc in doctors:
+            if clean_name in doc["name"].lower():
+                return doc["id"]
+        return None
+
+    @llm.function_tool(description="List all clinical specialties/departments and matching doctors available at Blackfriars Medical Practice.")
+    def list_specialties_and_doctors(self) -> str:
+        """List all clinical specialties and their doctors."""
+        logger.info("Listing specialties and doctors.")
+        doctors = database.get_doctors_by_specialty()
+        if not doctors:
+            return "No doctors registered in the clinic system."
+        
+        result = "Specialties and Doctors at Blackfriars Medical Practice:\n"
+        for doc in doctors:
+            result += f"- {doc['name']} ({doc['gender']}), Specialty: {doc['specialty']}, Qualifications: {doc['qualifications']}\n"
+        return result
+
+    @llm.function_tool(description="Check available appointment slots for a specific doctor and/or specific date.")
+    def check_availability(
+        self,
+        doctor_name: Optional[str] = None,
+        date: Optional[str] = None
+    ) -> str:
         """
-        Mock function to look up user details.
+        Check available slots in the clinic database.
 
         Args:
-            phone: The phone number to look up
+            doctor_name: The name of the doctor (optional, e.g. 'Kanabar' or 'Ami').
+            date: The date in YYYY-MM-DD format (optional, e.g. '2026-06-22').
         """
-        logger.info(f"Looking up user: {phone}")
-        return f"User found: Shreyas Raj. Status: Premium. Last order: Coffee setup (Delivered)."
+        logger.info(f"Checking availability for doctor: {doctor_name}, date: {date}")
+        
+        doctor_id = None
+        if doctor_name:
+            doctor_id = self._find_doctor_id(doctor_name)
+            if not doctor_id:
+                return f"Could not find a doctor matching the name '{doctor_name}'. Please verify the spelling or check the doctor list."
+                
+        slots = database.get_available_slots(doctor_id=doctor_id, date_str=date)
+        if not slots:
+            doc_msg = f" for Dr. {doctor_name}" if doctor_name else ""
+            date_msg = f" on {date}" if date else ""
+            return f"No available slots found{doc_msg}{date_msg}. Please suggest another date or doctor."
+            
+        result = "Available Slots (please offer these specific options to the patient):\n"
+        # Return at most 6 slots to prevent overwhelming the voice session / audio stream
+        for slot in slots[:6]:
+            dt = datetime.datetime.fromisoformat(slot["start_time"])
+            formatted_time = dt.strftime("%A, %B %d at %I:%M %p")
+            result += f"- Slot ID {slot['id']}: {formatted_time} with {slot['doctor_name']} ({slot['specialty']})\n"
+        return result
+
+    @llm.function_tool(description="Book a new appointment. Patient name, phone number, and slot ID are required.")
+    def book_appointment(
+        self,
+        patient_name: str,
+        patient_phone: str,
+        slot_id: int,
+        appointment_type: str = "Consultation"
+    ) -> str:
+        """
+        Book an appointment slot.
+
+        Args:
+            patient_name: The patient's full name.
+            patient_phone: The patient's phone number.
+            slot_id: The ID of the chosen slot.
+            appointment_type: Type of appointment, e.g., Consultation, Follow-up.
+        """
+        logger.info(f"Booking appointment: name={patient_name}, phone={patient_phone}, slot_id={slot_id}")
+        res = database.book_appointment(patient_name, patient_phone, slot_id, appointment_type)
+        return res["message"]
+
+    @llm.function_tool(description="Look up existing appointments for a patient using their phone number.")
+    def lookup_appointments(
+        self,
+        patient_phone: str
+    ) -> str:
+        """
+        Lookup active appointments by phone number.
+
+        Args:
+            patient_phone: The patient's phone number.
+        """
+        logger.info(f"Looking up appointments for phone: {patient_phone}")
+        appointments = database.get_appointments_by_phone(patient_phone)
+        active = [a for a in appointments if a["status"] in ["booked", "rescheduled"]]
+        if not active:
+            return f"No active appointments found for phone number {patient_phone}."
+            
+        result = "Found active appointments:\n"
+        for app in active:
+            dt = datetime.datetime.fromisoformat(app["start_time"])
+            formatted_time = dt.strftime("%A, %B %d at %I:%M %p")
+            result += f"- Appointment ID {app['appointment_id']}: {app['appointment_type']} with {app['doctor_name']} on {formatted_time} (Status: {app['status']})\n"
+        return result
+
+    @llm.function_tool(description="Reschedule an existing appointment. Requires the existing appointment ID and a new available slot ID.")
+    def reschedule_appointment(
+        self,
+        appointment_id: int,
+        new_slot_id: int
+    ) -> str:
+        """
+        Reschedule an existing appointment to a new slot.
+
+        Args:
+            appointment_id: The ID of the existing appointment.
+            new_slot_id: The ID of the new slot to book.
+        """
+        logger.info(f"Rescheduling appointment {appointment_id} to new slot {new_slot_id}")
+        res = database.reschedule_appointment(appointment_id, new_slot_id)
+        return res["message"]
+
+    @llm.function_tool(description="Cancel an existing appointment. Requires the appointment ID.")
+    def cancel_appointment(
+        self,
+        appointment_id: int
+    ) -> str:
+        """
+        Cancel an existing appointment.
+
+        Args:
+            appointment_id: The ID of the appointment to cancel.
+        """
+        logger.info(f"Cancelling appointment {appointment_id}")
+        res = database.cancel_appointment(appointment_id)
+        return res["message"]
 
     @llm.function_tool(description="Transfer the call to a human support agent or another phone number.")
     async def transfer_call(self, destination: Optional[str] = None):
@@ -115,13 +241,10 @@ class TransferFunctions(llm.ToolContext):
             if not destination:
                  return "Error: No default transfer number configured."
         if "@" not in destination:
-            # If no domain is provided, append the SIP domain
             if config.SIP_DOMAIN:
-                # Ensure clean number (strip tel: or sip: prefix if present but no domain)
                 clean_dest = destination.replace("tel:", "").replace("sip:", "")
                 destination = f"sip:{clean_dest}@{config.SIP_DOMAIN}"
             else:
-                # Fallback to tel URI if no domain configured
                 if not destination.startswith("tel:") and not destination.startswith("sip:"):
                      destination = f"tel:{destination}"
         elif not destination.startswith("sip:"):
@@ -129,16 +252,10 @@ class TransferFunctions(llm.ToolContext):
         
         logger.info(f"Transferring call to {destination}")
         
-        # Determine the participant identity
-        # For outbound calls initiated by this agent, the participant identity is typically "sip_<phone_number>"
-        # For inbound, we might need to find the remote participant.
         participant_identity = None
-        
-        # If we stored the phone number from metadata, we can construct the identity
         if self.phone_number:
             participant_identity = f"sip_{self.phone_number}"
         else:
-            # Try to find a participant that is NOT the agent
             for p in self.ctx.room.remote_participants.values():
                 participant_identity = p.identity
                 break
@@ -168,32 +285,22 @@ class OutboundAssistant(Agent):
     An AI agent tailored for outbound calls.
     Attempts to be helpful and concise.
     """
-    def __init__(self, tools: list) -> None:
+    def __init__(self, instructions: str, tools: list) -> None:
         super().__init__(
-            instructions=config.SYSTEM_PROMPT,
+            instructions=instructions,
             tools=tools,
         )
-
-
 
 
 async def entrypoint(ctx: agents.JobContext):
     """
     Main entrypoint for the agent.
-    
-    For outbound calls:
-    1. Checks for 'phone_number' in the job metadata.
-    2. Connects to the room.
-    3. Initiates the SIP call to the phone number.
-    4. Waits for answer before speaking.
     """
     logger.info(f"Connecting to room: {ctx.room.name}")
     
-    # parse the phone number AND config from the metadata
     phone_number = None
     config_dict = {}
     
-    # Check Job Metadata (Legacy/Dispatch)
     try:
         if ctx.job.metadata:
             data = json.loads(ctx.job.metadata)
@@ -202,18 +309,21 @@ async def entrypoint(ctx: agents.JobContext):
     except Exception:
         pass
         
-    # Check Room Metadata (Dashboard/Route.ts) - Overrides Job Metadata if present
     try:
         if ctx.room.metadata:
             data = json.loads(ctx.room.metadata)
             if data.get("phone_number"):
                 phone_number = data.get("phone_number")
-            config_dict.update(data) # Merge configs
+            config_dict.update(data)
     except Exception:
         logger.warning("No valid JSON metadata found in Room.")
 
     # Initialize function context
-    fnc_ctx = TransferFunctions(ctx, phone_number)
+    fnc_ctx = ClinicReceptionistTools(ctx, phone_number)
+
+    # Inject current date and time dynamically
+    now_str = datetime.datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
+    system_instructions = f"{config.SYSTEM_PROMPT}\n\n**IMPORTANT CURRENT CONTEXT:**\n- Today's date and time is: {now_str}.\n"
 
     # Initialize the Agent Session with plugins
     session = AgentSession(
@@ -226,20 +336,15 @@ async def entrypoint(ctx: agents.JobContext):
     # Start the session
     await session.start(
         room=ctx.room,
-        agent=OutboundAssistant(tools=list(fnc_ctx.function_tools.values())),
+        agent=OutboundAssistant(instructions=system_instructions, tools=list(fnc_ctx.function_tools.values())),
         room_input_options=RoomInputOptions(
             noise_cancellation=noise_cancellation.BVCTelephony(),
-            close_on_disconnect=True, # Close room when agent disconnects
+            close_on_disconnect=True,
         ),
     )
 
-    # Logic to dial out:
-    # 1. If 'phone_number' is present, we MIGHT need to dial.
-    # 2. Check if a SIP participant is already in the room (Dashboard dispatch case).
-    
     should_dial = False
     if phone_number:
-        # Check if any remote participant looks like our user (sip_PHONE)
         user_already_here = False
         for p in ctx.room.remote_participants.values():
             if f"sip_{phone_number}" in p.identity or "sip_" in p.identity:
@@ -255,44 +360,28 @@ async def entrypoint(ctx: agents.JobContext):
     if should_dial:
         logger.info(f"Initiating outbound SIP call to {phone_number}...")
         try:
-            # Create a SIP participant to dial out
-            # This effectively "calls" the phone number and brings them into this room
-            # --- CONNECTING TO THE PHONE NETWORK ---
-            # This step actually "dials" the number using Vobiz (SIP Trunk).
-            # It invites the phone number into this digital room.
             await ctx.api.sip.create_sip_participant(
                 api.CreateSIPParticipantRequest(
                     room_name=ctx.room.name,
                     sip_trunk_id=config.SIP_TRUNK_ID,
                     sip_call_to=phone_number,
-                    participant_identity=f"sip_{phone_number}", # Unique ID for the SIP user
-                    wait_until_answered=True, # Important: Wait for pickup before continuing
+                    participant_identity=f"sip_{phone_number}",
+                    wait_until_answered=True,
                 )
             )
             logger.info("Call answered! Agent is now listening.")
-            
-            # Note: We do NOT generate an initial reply here immediately.
-            # Usually for outbound, we want to hear "Hello?" from the user first,
-            # OR we can speak immediately. 
-            # If you want the agent to speak first, uncomment the lines below:
-            
             await session.generate_reply(
                 instructions=config.INITIAL_GREETING
             )
-            
         except Exception as e:
             logger.error(f"Failed to place outbound call: {e}")
-            # Ensure we clean up if the call fails
             ctx.shutdown()
     else:
-        # Fallback for inbound calls (if this agent is used for that) OR Dashboard calls where user is already there
         logger.info("Detecting if we should greet...")
-        # Give a small delay for audio to stabilize if user just joined
         await session.generate_reply(instructions=config.fallback_greeting)
 
 
 if __name__ == "__main__":
-    # The agent name "outbound-caller" is used by the dispatch script to find this worker
     agents.cli.run_app(
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
